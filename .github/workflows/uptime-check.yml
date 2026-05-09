@@ -1,0 +1,27 @@
+name: Uptime Check
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  uptime:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check homepage
+        env:
+          UPTIME_URL: ${{ secrets.UPTIME_URL }}
+        run: |
+          if [ -z "$UPTIME_URL" ]; then
+            echo "Missing secret UPTIME_URL"
+            exit 1
+          fi
+
+          HOME_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "$UPTIME_URL/")
+          HEALTH_STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "$UPTIME_URL/api/health")
+
+          echo "Homepage status: $HOME_STATUS"
+          echo "Health status: $HEALTH_STATUS"
+
+          [ "$HOME_STATUS" = "200" ] && [ "$HEALTH_STATUS" = "200" ]
