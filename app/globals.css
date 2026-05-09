@@ -409,6 +409,10 @@ h1 {
   gap: 18px;
 }
 
+.sheet-empty-state {
+  grid-column: 1 / -1;
+}
+
 .widget-zone {
   position: relative;
   width: 100%;

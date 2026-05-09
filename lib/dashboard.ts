@@ -29,6 +29,13 @@ const aiTopics = new Set([
   "agents"
 ]);
 
+function prefixRepoIds(prefix: string, repos: RepoRecord[]) {
+  return repos.map((repo) => ({
+    ...repo,
+    id: `${prefix}-${repo.id}`
+  }));
+}
+
 const repos: RepoRecord[] = [
   {
     id: "huggingface-transformers",
@@ -122,7 +129,7 @@ const repos: RepoRecord[] = [
   }
 ];
 
-const claudeCliRepos: RepoRecord[] = [
+let claudeCliRepos: RepoRecord[] = [
   {
     id: "everything-claude-code",
     name: "affaan-m/everything-claude-code",
@@ -235,7 +242,9 @@ const claudeCliRepos: RepoRecord[] = [
   }
 ];
 
-const agentRepos: RepoRecord[] = [
+claudeCliRepos = prefixRepoIds("claude", claudeCliRepos);
+
+let agentRepos: RepoRecord[] = [
   {
     id: "everything-claude-code",
     name: "affaan-m/everything-claude-code",
@@ -348,7 +357,9 @@ const agentRepos: RepoRecord[] = [
   }
 ];
 
-const skillsRepos: RepoRecord[] = [
+agentRepos = prefixRepoIds("agent", agentRepos);
+
+let skillsRepos: RepoRecord[] = [
   {
     id: "anthropics-skills",
     name: "anthropics/skills",
@@ -461,7 +472,9 @@ const skillsRepos: RepoRecord[] = [
   }
 ];
 
-const mcpRepos: RepoRecord[] = [
+skillsRepos = prefixRepoIds("skills", skillsRepos);
+
+let mcpRepos: RepoRecord[] = [
   {
     id: "n8n",
     name: "n8n-io/n8n",
@@ -573,6 +586,8 @@ const mcpRepos: RepoRecord[] = [
     url: "https://github.com/Mintplex-Labs/anything-llm"
   }
 ];
+
+mcpRepos = prefixRepoIds("mcp", mcpRepos);
 
 function isAiRepository(repo: RepoRecord) {
   return repo.topics.some((topic) => aiTopics.has(topic));

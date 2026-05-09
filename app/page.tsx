@@ -12,6 +12,190 @@ type DashboardResponse = ReturnType<typeof getDashboardData> & {
   message?: string;
 };
 
+type SnapshotSource = "seed" | "live";
+
+type DashboardCache = {
+  version: number;
+  savedAt: number;
+  source: SnapshotSource;
+  data: DashboardResponse;
+};
+
+type DashboardBaseline = {
+  version: number;
+  savedAt: number;
+  data: DashboardResponse;
+};
+
+const DASHBOARD_CACHE_KEY = "dashboard-live-data";
+const DASHBOARD_BASELINE_KEY = "dashboard-live-baseline";
+const DASHBOARD_CACHE_VERSION = 2;
+const AUTO_REFRESH_TTL_MS = 30 * 60 * 1000;
+
+type RepoView = DashboardResponse["topRepos"][number];
+
+type GrowthRepoView = RepoView & {
+  change: number;
+};
+
+function isRepoView(value: unknown): value is RepoView {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "string" &&
+    typeof record.name === "string" &&
+    typeof record.description === "string" &&
+    typeof record.language === "string" &&
+    typeof record.stars === "number" &&
+    Array.isArray(record.topics) &&
+    record.topics.every((topic) => typeof topic === "string") &&
+    typeof record.url === "string" &&
+    typeof record.stars7dAgo === "number" &&
+    (record.starGrowth === undefined || typeof record.starGrowth === "number") &&
+    (record.forks === undefined || typeof record.forks === "number")
+  );
+}
+
+function isDashboardResponse(value: unknown): value is DashboardResponse {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.lastUpdated === "string" &&
+    Array.isArray(record.topRepos) &&
+    record.topRepos.every(isRepoView) &&
+    Array.isArray(record.fastestGrowingRepos) &&
+    record.fastestGrowingRepos.every(isRepoView) &&
+    Array.isArray(record.claudeCliRepos) &&
+    record.claudeCliRepos.every(isRepoView) &&
+    Array.isArray(record.agentRepos) &&
+    record.agentRepos.every(isRepoView) &&
+    Array.isArray(record.skillsRepos) &&
+    record.skillsRepos.every(isRepoView) &&
+    Array.isArray(record.mcpRepos) &&
+    record.mcpRepos.every(isRepoView) &&
+    (record.warning === undefined || typeof record.warning === "string") &&
+    (record.message === undefined || typeof record.message === "string")
+  );
+}
+
+function readJsonStorage<T>(
+  key: string,
+  validator: (value: unknown) => value is T
+): T | null {
+  const raw = window.localStorage.getItem(key);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return validator(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readDashboardCache(): DashboardCache | null {
+  const cache = readJsonStorage(DASHBOARD_CACHE_KEY, (value): value is DashboardCache => {
+    if (!value || typeof value !== "object") {
+      return false;
+    }
+
+    const record = value as Record<string, unknown>;
+    return (
+      record.version === DASHBOARD_CACHE_VERSION &&
+      typeof record.savedAt === "number" &&
+      (record.source === "seed" || record.source === "live") &&
+      isDashboardResponse(record.data)
+    );
+  });
+
+  return cache;
+}
+
+function readDashboardBaseline(): DashboardBaseline | null {
+  return readJsonStorage(DASHBOARD_BASELINE_KEY, (value): value is DashboardBaseline => {
+    if (!value || typeof value !== "object") {
+      return false;
+    }
+
+    const record = value as Record<string, unknown>;
+    return (
+      record.version === DASHBOARD_CACHE_VERSION &&
+      typeof record.savedAt === "number" &&
+      isDashboardResponse(record.data)
+    );
+  });
+}
+
+function writeDashboardCache(data: DashboardResponse, source: SnapshotSource) {
+  window.localStorage.setItem(
+    DASHBOARD_CACHE_KEY,
+    JSON.stringify({
+      version: DASHBOARD_CACHE_VERSION,
+      savedAt: Date.now(),
+      source,
+      data
+    } satisfies DashboardCache)
+  );
+}
+
+function writeDashboardBaseline(data: DashboardResponse) {
+  window.localStorage.setItem(
+    DASHBOARD_BASELINE_KEY,
+    JSON.stringify({
+      version: DASHBOARD_CACHE_VERSION,
+      savedAt: Date.now(),
+      data
+    } satisfies DashboardBaseline)
+  );
+}
+
+function getRepoChange(repo: RepoView, baseline: DashboardResponse | null) {
+  if (!baseline) {
+    return null;
+  }
+
+  const baselineRepo = baseline.topRepos.find((item) => item.id === repo.id);
+  if (!baselineRepo) {
+    return null;
+  }
+
+  return repo.stars - baselineRepo.stars;
+}
+
+function formatChange(value: number | null) {
+  if (value === null) {
+    return "—";
+  }
+
+  return `${value >= 0 ? "+" : ""}${formatNumber(value)}`;
+}
+
+function buildGrowthRepos(
+  current: DashboardResponse,
+  baseline: DashboardResponse | null
+): GrowthRepoView[] {
+  if (!baseline) {
+    return [];
+  }
+
+  return current.topRepos
+    .map((repo) => ({
+      ...repo,
+      change: getRepoChange(repo, baseline) ?? 0
+    }))
+    .filter((repo) => repo.change > 0)
+    .sort((a, b) => b.change - a.change)
+    .slice(0, 10);
+}
+
 async function requestDashboardData() {
   const response = await fetch("/api/refresh-data", {
     method: "POST",
@@ -110,9 +294,9 @@ const sheetThemes: Record<
     themeClass: "sheet-theme-top"
   },
   growth: {
-    label: "7-day growth",
-    title: "Fastest-growing AI repositories",
-    copy: "Filtered to repos that started the 7-day window below 150 stars.",
+    label: "Recent growth",
+    title: "Recent growth",
+    copy: "Compared with the previous live snapshot.",
     icon: "github",
     themeClass: "sheet-theme-growth"
   },
@@ -217,21 +401,17 @@ function RepoWidget({
 
 export default function HomePage() {
   const [dashboardData, setDashboardData] = useState<DashboardResponse>(() => getDashboardData());
+  const [dashboardSource, setDashboardSource] = useState<SnapshotSource>("seed");
+  const [comparisonData, setComparisonData] = useState<DashboardResponse | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [refreshWarning, setRefreshWarning] = useState<string | null>(null);
   const [activeSheet, setActiveSheet] = useState<SheetId>("top");
-  const {
-    topRepos,
-    fastestGrowingRepos,
-    claudeCliRepos,
-    agentRepos,
-    skillsRepos,
-    mcpRepos,
-    lastUpdated
-  } = dashboardData;
+  const { topRepos, claudeCliRepos, agentRepos, skillsRepos, mcpRepos, lastUpdated } =
+    dashboardData;
+  const growthRepos = buildGrowthRepos(dashboardData, comparisonData);
   const maxStars = topRepos[0]?.stars ?? 1;
-  const maxGrowth = fastestGrowingRepos[0]?.starGrowth ?? 1;
+  const maxGrowth = growthRepos[0]?.change ?? 1;
   const maxClaudeStars = claudeCliRepos[0]?.stars ?? 1;
   const maxAgentStars = agentRepos[0]?.stars ?? 1;
   const maxSkillsStars = skillsRepos[0]?.stars ?? 1;
@@ -245,18 +425,30 @@ export default function HomePage() {
   const sheetTheme = sheetThemes[activeSheet];
 
   useEffect(() => {
-    const storedDashboard = window.localStorage.getItem("dashboard-live-data");
+    const storedDashboard = readDashboardCache();
+    const storedBaseline = readDashboardBaseline();
     if (!storedDashboard) {
       setRefreshError(null);
       setRefreshWarning(null);
+      setComparisonData(null);
     } else {
-      try {
-        const parsedDashboard = JSON.parse(storedDashboard) as DashboardResponse;
-        setDashboardData(parsedDashboard);
-        setRefreshWarning(parsedDashboard.warning ?? null);
-      } catch {
-        window.localStorage.removeItem("dashboard-live-data");
-      }
+      setDashboardData(storedDashboard.data);
+      setDashboardSource(storedDashboard.source);
+      setRefreshWarning(storedDashboard.data.warning ?? null);
+      setComparisonData(
+        storedDashboard.source === "live" ? storedBaseline?.data ?? null : null
+      );
+    }
+
+    const currentSource = storedDashboard?.source ?? "seed";
+    const currentSnapshot = storedDashboard?.data ?? getDashboardData();
+    const shouldAutoRefresh =
+      !storedDashboard ||
+      storedDashboard.source !== "live" ||
+      Date.now() - storedDashboard.savedAt > AUTO_REFRESH_TTL_MS;
+
+    if (!shouldAutoRefresh) {
+      return;
     }
 
     let isMounted = true;
@@ -267,8 +459,17 @@ export default function HomePage() {
         if (!isMounted) {
           return;
         }
+
+        if (currentSource === "live") {
+          writeDashboardBaseline(currentSnapshot);
+          setComparisonData(currentSnapshot);
+        } else {
+          setComparisonData(null);
+        }
+
+        writeDashboardCache(nextDashboardData, "live");
         setDashboardData(nextDashboardData);
-        window.localStorage.setItem("dashboard-live-data", JSON.stringify(nextDashboardData));
+        setDashboardSource("live");
         setRefreshError(null);
         setRefreshWarning(nextDashboardData.warning ?? null);
       } catch (error) {
@@ -299,9 +500,15 @@ export default function HomePage() {
     setRefreshWarning(null);
 
     try {
+      if (dashboardSource === "live") {
+        writeDashboardBaseline(dashboardData);
+        setComparisonData(dashboardData);
+      }
+
       const nextDashboardData = await requestDashboardData();
       setDashboardData(nextDashboardData);
-      window.localStorage.setItem("dashboard-live-data", JSON.stringify(nextDashboardData));
+      setDashboardSource("live");
+      writeDashboardCache(nextDashboardData, "live");
       setRefreshWarning(nextDashboardData.warning ?? null);
     } catch (error) {
       setRefreshError(error instanceof Error ? error.message : "Unable to refresh data.");
@@ -335,15 +542,15 @@ export default function HomePage() {
           >
             🏆 Top repositories
           </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={isGrowthSheet}
-            className="sheet-tab sheet-tab-github"
-            onClick={() => setActiveSheet("growth")}
-          >
-            📈 7-day growth
-          </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={isGrowthSheet}
+                className="sheet-tab sheet-tab-github"
+                onClick={() => setActiveSheet("growth")}
+              >
+            📈 Recent growth
+              </button>
           <button
             type="button"
             role="tab"
@@ -416,26 +623,34 @@ export default function HomePage() {
                   accentLabel={`Rank #${index + 1}`}
                   primaryLabel="Stars"
                   primaryValue={formatNumber(repo.stars)}
-                  secondaryLabel="7-day growth"
-                  secondaryValue={`+${formatNumber(repo.stars - repo.stars7dAgo)}`}
+                  secondaryLabel="Change vs previous snapshot"
+                  secondaryValue={formatChange(getRepoChange(repo, comparisonData))}
                   fillPercent={Math.max(8, Math.round((repo.stars / maxStars) * 100))}
                 />
               ))}
 
             {isGrowthSheet &&
-              fastestGrowingRepos.map((repo, index) => (
+              growthRepos.map((repo, index) => (
                 <RepoWidget
                   key={repo.id}
                   repo={repo}
                   rank={index + 1}
-                  accentLabel={`Growth #${index + 1}`}
-                  primaryLabel="7-day growth"
-                  primaryValue={`+${formatNumber(repo.starGrowth)} stars`}
+                  accentLabel={`Change #${index + 1}`}
+                  primaryLabel="Change vs previous snapshot"
+                  primaryValue={formatChange(repo.change)}
                   secondaryLabel="Current stars"
                   secondaryValue={formatNumber(repo.stars)}
-                  fillPercent={Math.max(8, Math.round((repo.starGrowth / maxGrowth) * 100))}
+                  fillPercent={Math.max(8, Math.round((repo.change / maxGrowth) * 100))}
                 />
               ))}
+
+            {isGrowthSheet && growthRepos.length === 0 ? (
+              <div className="sheet-empty-state">
+                <p className="sheet-copy">
+                  Growth comparison will appear after a second live refresh is available.
+                </p>
+              </div>
+            ) : null}
 
             {isClaudeSheet &&
               claudeCliRepos.map((repo, index) => (

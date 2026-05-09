@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getAllDashboardRepoIdentifiers, getDashboardData, type RepoSnapshotMap } from "../../../lib/dashboard";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +12,10 @@ type RefreshPayload = ReturnType<typeof getDashboardData> & {
   warning?: string;
   message?: string;
 };
+
+const REFRESH_THROTTLE_MS = 30_000;
+const REFRESH_LOG_TTL_MS = 10 * 60_000;
+const refreshRequestLog = new Map<string, number>();
 
 function parseGitHubCount(value: string) {
   const normalized = value.trim().toLowerCase().replace(/,/g, "");
@@ -80,7 +84,45 @@ function getTodayDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
-export async function POST() {
+function getRefreshRequestKey(request: NextRequest) {
+  const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const realIp = request.headers.get("x-real-ip");
+  const userAgent = request.headers.get("user-agent") ?? "unknown";
+
+  return `${forwardedFor ?? realIp ?? "unknown"}:${userAgent}`;
+}
+
+function pruneRefreshRequestLog(now: number) {
+  for (const [key, lastSeen] of refreshRequestLog.entries()) {
+    if (now - lastSeen > REFRESH_LOG_TTL_MS) {
+      refreshRequestLog.delete(key);
+    }
+  }
+}
+
+export async function POST(request: NextRequest) {
+  const now = Date.now();
+  pruneRefreshRequestLog(now);
+
+  const requestKey = getRefreshRequestKey(request);
+  const lastRefresh = refreshRequestLog.get(requestKey);
+  if (lastRefresh && now - lastRefresh < REFRESH_THROTTLE_MS) {
+    const retryAfterSeconds = Math.ceil((REFRESH_THROTTLE_MS - (now - lastRefresh)) / 1000);
+    return NextResponse.json(
+      {
+        message: `Refresh is temporarily throttled. Try again in ${retryAfterSeconds} seconds.`
+      },
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(retryAfterSeconds)
+        }
+      }
+    );
+  }
+
+  refreshRequestLog.set(requestKey, now);
+
   const repoIdentifiers = getAllDashboardRepoIdentifiers();
   const githubToken = process.env.GITHUB_TOKEN;
 
